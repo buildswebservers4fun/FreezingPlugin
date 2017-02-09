@@ -1,0 +1,193 @@
+plugins {
+    id 'org.hidetake.ssh' version '2.7.0'
+}
+
+apply plugin: 'java'
+apply plugin: 'eclipse'
+apply plugin: 'idea'
+apply plugin: 'maven'
+apply plugin: 'maven-publish'
+apply plugin: 'jacoco'
+apply plugin: 'application'
+
+
+group 'edu.rosehulman.csse477.buildswebservers4fun'
+mainClassName = "FreezingPluginLoader"
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+
+if (System.getenv("CI_BUILD_TAG") != null) {
+    version = "${System.getenv("CI_BUILD_TAG")}"
+} else {
+    version = '1.0.0-SNAPSHOT'
+}
+
+repositories {
+    maven {
+        url "https://maven.csse.rose-hulman.edu/artifactory/libs-release"
+    }
+}
+dependencies {
+    testCompile group: 'junit', name: 'junit', version: '4.11'
+
+    compile(group: 'edu.rosehulman.csse477.buildswebservers4fun', name: 'webserver3000', version: "1.2.+")
+}
+
+jar {
+    manifest {
+        attributes "Implementation-Title": "FreezingPlugin",
+                "Implementation-Version": "${version}",
+                "Main-Class": "${mainClassName}"
+    }
+}
+
+uploadArchives {
+    repositories {
+        mavenDeployer {
+            repository(url: "file://${buildDir}/repo")
+        }
+    }
+}
+
+task packageSources(type: Jar, dependsOn: 'classes') {
+    from sourceSets.main.allSource
+    classifier = 'sources'
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifact packageSources
+        }
+    }
+}
+
+publishing {
+    repositories {
+        maven {
+            credentials {
+                username System.getenv('MAVEN_USER')
+                password System.getenv('MAVEN_PASSWORD')
+            }
+            url "https://maven.csse.rose-hulman.edu/artifactory/student-release-local"
+        }
+    }
+}
+
+// Code coverage analyzer
+jacoco {
+    toolVersion = "0.7.+"
+}
+
+jacocoTestReport {
+    group = "Reporting"
+    description = "Generate Jacoco coverage reports after running tests."
+    additionalSourceDirs = files(sourceSets.main.allJava.srcDirs)
+
+    reports {
+        xml.enabled true
+        csv.enabled false
+        html.enabled true
+    }
+}
+
+
+test {
+    jacoco {
+        append = false
+    }
+}
+
+test.finalizedBy(jacocoTestReport)
+
+task codeCoverageInfo (dependsOn: jacocoTestReport) {
+    ext.srcFile = file("${reportsDir}/jacoco/test/jacocoTestReport.xml")
+    doLast {
+        println "Transforming source file."
+
+        def parser = new XmlParser()
+        parser.setFeature("http://apache.org/xml/features/disallow-doctype-decl", false);
+        parser.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        parser.setFeature("http://xml.org/sax/features/namespaces", false)
+
+        def reportNode = parser.parse(srcFile)
+        reportNode.children().each {
+            if(it.name() == 'counter') {
+                String type = it.@type
+                float missed = it.@missed as float
+                float covered = it.@covered as float
+                float percentage = covered / (missed + covered) * 100
+                println "Code Coverage[$type]: $percentage%"
+            }
+        }
+    }
+}
+jacocoTestReport.finalizedBy(codeCoverageInfo)
+
+// SSH Publishing
+ssh.settings { knownHosts = allowAnyHosts }
+remotes {
+    prod {
+        host = '477-38.csse.rose-hulman.edu'
+        user = System.getenv('SSH_USER')
+        password = System.getenv('SSH_PASSWORD')
+    }
+    test {
+        host = '477-33.csse.rose-hulman.edu'
+        user = System.getenv('SSH_USER')
+        password = System.getenv('SSH_PASSWORD')
+    }
+}
+
+task publishToTest(dependsOn: jar) << {
+    ssh.run {
+        session(remotes.test) {
+            println "Checking if remote /tmp/webserver exists ..."
+            def result = execute('if test -d /tmp/FreezingPlugin; then echo "exists"; fi')
+            if(result != "exists") {
+                println("Remote /tmp/FreezingPlugin does not exist, creating a new one...")
+                execute('mkdir -p /tmp/FreezingPlugin')
+                println("Remote /tmp/FreezingPlugin created!")
+            }
+            println "Transfering file from local build/distributions to remote /tmp/FreezingPlugin ..."
+            put from: "${buildDir}/libs/FreezingPlugin-${version}.jar", into: '/tmp/FreezingPlugin'
+            println "Removing old versions of plugin"
+            try {
+                remove '/home/csse/webserver/plugins/FreezingPlugin-*.jar'
+            } catch(Exception) {}
+            println "Copying data from the temp folder to the plugin folder ..."
+            execute('cp /tmp/FreezingPlugin/* /home/csse/webserver/plugins', pty: true)
+            println "Done! Clearing the tmp folder ..."
+            execute('rm -rf /tmp/FreezingPlugin')
+            println "All done!"
+        }
+    }
+}
+
+task publishToProd(dependsOn: jar) << {
+    ssh.run {
+        session(remotes.prod) {
+            println "Checking if remote /tmp/webserver exists ..."
+            def result = execute('if test -d /tmp/FreezingPlugin; then echo "exists"; fi')
+            if(result != "exists") {
+                println("Remote /tmp/FreezingPlugin does not exist, creating a new one...")
+                execute('mkdir -p /tmp/FreezingPlugin')
+                println("Remote /tmp/FreezingPlugin created!")
+            }
+            println "Transfering file from local build/distributions to remote /tmp/FreezingPlugin ..."
+            put from: "${buildDir}/libs/FreezingPlugin-${version}.jar", into: '/tmp/FreezingPlugin'
+            println "Removing old versions of plugin"
+            try {
+                remove '/home/csse/webserver/plugins/FreezingPlugin-*.jar'
+            } catch(Exception) {}
+            println "Copying data from the temp folder to the plugin folder ..."
+            execute('cp /tmp/FreezingPlugin/* /home/csse/webserver/plugins', pty: true)
+            println "Done! Clearing the tmp folder ..."
+            execute('rm -rf /tmp/FreezingPlugin')
+            println "All done!"
+        }
+    }
+}
